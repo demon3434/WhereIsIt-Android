@@ -1,6 +1,6 @@
 ![WhereIsIt App Icon](app/src/main/res/mipmap-xxxhdpi/ic_launcher.png)
 
-# WhereIsIt Android
+# 找东西 Android 客户端
 
 WhereIsIt Android 是一个用于“查找物品 / 管理物品位置”的移动端应用，帮助用户快速定位物品、减少重复寻找时间。  
 需要配合 [服务端](https://github.com/demon3434/WhereIsIt) 使用
