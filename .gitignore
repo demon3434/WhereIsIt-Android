@@ -1,0 +1,7 @@
+﻿# Local crash/heap dumps
+java_pid*.hprof
+*.hprof
+
+# Local temporary SDK/Gradle artifacts
+.tmp-sdk/
+.tmp-gradle/

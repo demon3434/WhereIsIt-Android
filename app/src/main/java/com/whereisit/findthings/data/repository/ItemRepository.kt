@@ -9,6 +9,7 @@ import android.net.Uri
 import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
+import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
@@ -50,12 +51,22 @@ class ItemRepository(
     }
 
     suspend fun login(username: String, password: String, baseUrl: String): TokenResponse {
-        return guard { apiFactory.service(baseUrl).login(LoginRequest(username, password)) }
+        return guard {
+            val raw = apiFactory.service(baseUrl).login(LoginRequest(username, password))
+            parseLoginToken(raw)
+        }
     }
 
     suspend fun checkHealth(baseUrl: String): Boolean {
         return try {
-            apiFactory.service(baseUrl).health().status.equals("ok", ignoreCase = true)
+            val raw = apiFactory.service(baseUrl).health()
+            val data = unwrapData(raw)
+            val status = when {
+                data.isJsonObject -> data.asJsonObject.get("status")?.asStringOrNull()
+                raw.isJsonObject -> raw.asJsonObject.get("status")?.asStringOrNull()
+                else -> null
+            }
+            status.equals("ok", ignoreCase = true)
         } catch (_: Exception) {
             false
         }
@@ -64,27 +75,32 @@ class ItemRepository(
     suspend fun changePassword(newPassword: String): MessageResponse {
         val (baseUrl, auth) = authInfo()
         return guard {
-            apiFactory.service(baseUrl).updateMe(
+            val raw = apiFactory.service(baseUrl).updateMe(
                 auth = auth,
                 payload = ProfileUpdateRequest(password = newPassword)
             )
+            parseMessageResponse(raw)
         }
     }
 
     suspend fun me(): UserMe {
         val (baseUrl, auth) = authInfo()
-        return guard { apiFactory.service(baseUrl).me(auth) }
+        return guard { fromJson(unwrapData(apiFactory.service(baseUrl).me(auth)), UserMe::class.java) }
     }
 
     suspend fun meta(): MetaPack {
         val (baseUrl, auth) = authInfo()
         val api = apiFactory.service(baseUrl)
         return guard {
+            val housesRaw = unwrapData(api.houses(auth))
+            val roomsRaw = unwrapData(api.rooms(auth))
+            val categoriesRaw = unwrapData(api.categories(auth))
+            val tagsRaw = unwrapData(api.tags(auth))
             MetaPack(
-                houses = api.houses(auth),
-                rooms = api.rooms(auth),
-                categories = api.categories(auth),
-                tags = api.tags(auth)
+                houses = fromJsonList(housesRaw, houseListType()),
+                rooms = fromJsonList(roomsRaw, roomListType()),
+                categories = fromJsonList(categoriesRaw, categoryListType()),
+                tags = fromJsonList(tagsRaw, tagListType())
             )
         }
     }
@@ -106,7 +122,7 @@ class ItemRepository(
                 sortOrder = "desc"
             )
 
-            val parsed = parsePagedItems(raw, page, pageSize)
+            val parsed = parsePagedItems(unwrapData(raw), page, pageSize)
             if (filter.tagIds.size <= 1) {
                 parsed
             } else {
@@ -125,7 +141,7 @@ class ItemRepository(
             val api = apiFactory.service(baseUrl)
             val data = gson.toJson(payload).toRequestBody("text/plain".toMediaType())
             val files = imageUris.mapIndexed { index, uri -> uriToPart(index, uri) }
-            api.createItem(auth, data, files)
+            fromJson(unwrapData(api.createItem(auth, data, files)), ItemDto::class.java)
         }
     }
 
@@ -133,16 +149,16 @@ class ItemRepository(
         val (baseUrl, auth) = authInfo()
         guard {
             val api = apiFactory.service(baseUrl)
-            removeImageIds.forEach { api.deleteItemImage(auth, itemId, it) }
+            removeImageIds.forEach { parseMessageResponse(api.deleteItemImage(auth, itemId, it)) }
             val data = gson.toJson(payload).toRequestBody("text/plain".toMediaType())
             val files = imageUris.mapIndexed { index, uri -> uriToPart(index, uri) }
-            api.updateItem(auth, itemId, data, files)
+            fromJson(unwrapData(api.updateItem(auth, itemId, data, files)), ItemDto::class.java)
         }
     }
 
     suspend fun deleteItem(itemId: Int) {
         val (baseUrl, auth) = authInfo()
-        guard { apiFactory.service(baseUrl).deleteItem(auth, itemId) }
+        guard { parseMessageResponse(apiFactory.service(baseUrl).deleteItem(auth, itemId)) }
     }
 
     fun fullImageUrl(baseUrl: String, raw: String): String {
@@ -153,6 +169,15 @@ class ItemRepository(
     }
 
     private fun parsePagedItems(raw: JsonElement, requestPage: Int, requestPageSize: Int): PagedItems {
+        if (raw.isJsonNull) {
+            return PagedItems(
+                items = emptyList(),
+                total = 0,
+                page = requestPage.coerceAtLeast(1),
+                pageSize = requestPageSize.coerceAtLeast(1)
+            )
+        }
+
         if (raw.isJsonArray) {
             val list = gson.fromJson<List<ItemDto>>(raw, itemListType())
             val sorted = list.sortedByDescending { it.updatedAt }
@@ -221,6 +246,58 @@ class ItemRepository(
     }
 
     private fun itemListType() = object : TypeToken<List<ItemDto>>() {}.type
+    private fun houseListType() = object : TypeToken<List<HouseDto>>() {}.type
+    private fun roomListType() = object : TypeToken<List<RoomDto>>() {}.type
+    private fun categoryListType() = object : TypeToken<List<CategoryDto>>() {}.type
+    private fun tagListType() = object : TypeToken<List<TagDto>>() {}.type
+
+    private fun parseLoginToken(raw: JsonElement): TokenResponse {
+        val tokenContainer = unwrapData(raw).takeIf { it.isJsonObject }?.asJsonObject
+            ?: throw AppError.Business("登录返回格式错误")
+        val token = tokenContainer.get("access_token")?.asStringOrNull().orEmpty()
+        val tokenType = tokenContainer.get("token_type")?.asStringOrNull().orEmpty().ifBlank { "bearer" }
+        if (token.isBlank()) {
+            val rootObj = raw.takeIf { it.isJsonObject }?.asJsonObject
+            val envelopeMessage = rootObj?.get("message")?.asStringOrNull()
+            throw AppError.Business(envelopeMessage ?: "登录返回缺少 access_token")
+        }
+        return TokenResponse(accessToken = token, tokenType = tokenType)
+    }
+
+    private fun parseMessageResponse(raw: JsonElement): MessageResponse {
+        val data = unwrapData(raw)
+        if (data.isJsonObject && data.asJsonObject.has("message")) {
+            return fromJson(data, MessageResponse::class.java)
+        }
+        if (raw.isJsonObject) {
+            val rootMsg = raw.asJsonObject.get("message")?.asStringOrNull()
+            if (!rootMsg.isNullOrBlank()) return MessageResponse(rootMsg)
+        }
+        return MessageResponse("操作成功")
+    }
+
+    private fun <T> fromJson(raw: JsonElement, cls: Class<T>): T {
+        return gson.fromJson(raw, cls)
+    }
+
+    private fun <T> fromJsonList(raw: JsonElement, type: java.lang.reflect.Type): List<T> {
+        if (!raw.isJsonArray) return emptyList()
+        return gson.fromJson(raw, type)
+    }
+
+    private fun unwrapData(raw: JsonElement): JsonElement {
+        if (!raw.isJsonObject) return raw
+        val obj = raw.asJsonObject
+        val hasEnvelopeFields = obj.has("code") && obj.has("message") && obj.has("data")
+        if (!hasEnvelopeFields) return raw
+
+        val code = obj.get("code")?.asIntOrNull()
+        val message = obj.get("message")?.asStringOrNull()
+        if (code != null && code != 0) {
+            throw AppError.Business(message ?: "请求失败($code)")
+        }
+        return obj.get("data") ?: JsonNull.INSTANCE
+    }
 
     private suspend fun authInfo(): Pair<String, String> {
         runtimeAuth?.let {
@@ -341,10 +418,18 @@ class ItemRepository(
         } catch (e: HttpException) {
             if (e.code() == 401) throw AppError.Unauthorized()
             val msg = e.response()?.errorBody()?.string().orEmpty()
-            val detail = runCatching {
-                JsonParser.parseString(msg).asJsonObject.get("detail")?.asString
-            }.getOrNull()
-            throw AppError.Business(detail ?: "请求失败(${e.code()})")
+            val parsed = runCatching { JsonParser.parseString(msg) }.getOrNull()
+            val envelopeMessage = parsed
+                ?.takeIf { it.isJsonObject }
+                ?.asJsonObject
+                ?.get("message")
+                ?.asStringOrNull()
+            val detail = parsed
+                ?.takeIf { it.isJsonObject }
+                ?.asJsonObject
+                ?.get("detail")
+                ?.asStringOrNull()
+            throw AppError.Business(envelopeMessage ?: detail ?: "请求失败(${e.code()})")
         } catch (_: IOException) {
             throw AppError.Network()
         } catch (e: Exception) {
@@ -379,4 +464,12 @@ data class ItemFilter(
     val categoryId: Int? = null,
     val tagIds: Set<Int> = emptySet()
 )
+
+private fun JsonElement.asStringOrNull(): String? {
+    return try {
+        if (!isJsonPrimitive) null else asString
+    } catch (_: Exception) {
+        null
+    }
+}
 

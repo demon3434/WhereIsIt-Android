@@ -17,31 +17,31 @@ import retrofit2.http.Query
 
 interface ApiService {
     @POST("/api/auth/login")
-    suspend fun login(@Body request: LoginRequest): TokenResponse
+    suspend fun login(@Body request: LoginRequest): JsonElement
 
     @GET("/api/health")
-    suspend fun health(): HealthResponse
+    suspend fun health(): JsonElement
 
     @GET("/api/me")
-    suspend fun me(@Header("Authorization") auth: String): UserMe
+    suspend fun me(@Header("Authorization") auth: String): JsonElement
 
     @PUT("/api/me")
     suspend fun updateMe(
         @Header("Authorization") auth: String,
         @Body payload: ProfileUpdateRequest
-    ): MessageResponse
+    ): JsonElement
 
     @GET("/api/houses")
-    suspend fun houses(@Header("Authorization") auth: String): List<HouseDto>
+    suspend fun houses(@Header("Authorization") auth: String): JsonElement
 
     @GET("/api/rooms")
-    suspend fun rooms(@Header("Authorization") auth: String): List<RoomDto>
+    suspend fun rooms(@Header("Authorization") auth: String): JsonElement
 
     @GET("/api/categories")
-    suspend fun categories(@Header("Authorization") auth: String): List<CategoryDto>
+    suspend fun categories(@Header("Authorization") auth: String): JsonElement
 
     @GET("/api/tags")
-    suspend fun tags(@Header("Authorization") auth: String): List<TagDto>
+    suspend fun tags(@Header("Authorization") auth: String): JsonElement
 
     @GET("/api/items")
     suspend fun items(
@@ -63,7 +63,7 @@ interface ApiService {
         @Header("Authorization") auth: String,
         @Part("data") data: RequestBody,
         @Part files: List<MultipartBody.Part>
-    ): ItemDto
+    ): JsonElement
 
     @Multipart
     @PUT("/api/items/{id}")
@@ -72,16 +72,16 @@ interface ApiService {
         @Path("id") id: Int,
         @Part("data") data: RequestBody,
         @Part files: List<MultipartBody.Part>
-    ): ItemDto
+    ): JsonElement
 
     @DELETE("/api/items/{id}")
-    suspend fun deleteItem(@Header("Authorization") auth: String, @Path("id") id: Int): MessageResponse
+    suspend fun deleteItem(@Header("Authorization") auth: String, @Path("id") id: Int): JsonElement
 
     @DELETE("/api/items/{itemId}/images/{imageId}")
     suspend fun deleteItemImage(
         @Header("Authorization") auth: String,
         @Path("itemId") itemId: Int,
         @Path("imageId") imageId: Int
-    ): MessageResponse
+    ): JsonElement
 }
 

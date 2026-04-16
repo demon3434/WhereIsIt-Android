@@ -203,7 +203,13 @@ class ServiceAutoDiscovery(
                 healthClient.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) return@use false
                     val body = resp.body?.string().orEmpty()
-                    JSONObject(body).optString("status").equals("ok", ignoreCase = true)
+                    val json = JSONObject(body)
+                    val status = when {
+                        json.has("data") && json.opt("data") is JSONObject ->
+                            (json.optJSONObject("data") ?: JSONObject()).optString("status")
+                        else -> json.optString("status")
+                    }
+                    status.equals("ok", ignoreCase = true)
                 }
             }.getOrDefault(false)
             if (ok) return@withContext true
