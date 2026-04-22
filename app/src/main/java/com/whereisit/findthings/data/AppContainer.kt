@@ -6,6 +6,7 @@ import com.whereisit.findthings.data.network.LanDiscovery
 import com.whereisit.findthings.data.network.ServiceAutoDiscovery
 import com.whereisit.findthings.data.repository.ItemRepository
 import com.whereisit.findthings.data.repository.SessionRepository
+import com.whereisit.findthings.data.voice.VoiceSearchRepository
 
 class AppContainer(context: Context) {
     val sessionRepository = SessionRepository(context)
@@ -16,5 +17,10 @@ class AppContainer(context: Context) {
         apiFactory = apiFactory,
         sessionRepository = sessionRepository,
         contentResolver = context.contentResolver
+    )
+    val voiceSearchRepository = VoiceSearchRepository(
+        appContext = context.applicationContext,
+        apiFactory = apiFactory,
+        sessionRepository = sessionRepository
     )
 }

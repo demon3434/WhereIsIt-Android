@@ -129,8 +129,11 @@ import com.whereisit.findthings.data.network.DiscoveredService
 import com.whereisit.findthings.data.repository.ActiveEndpoint
 import com.whereisit.findthings.data.repository.AppTheme
 import com.whereisit.findthings.data.repository.ItemRepository
+import com.whereisit.findthings.data.voice.VoiceSearchRepository
+import com.whereisit.findthings.data.voice.model.VoiceFinalizeResponse
 import com.whereisit.findthings.ui.ItemFormState
 import com.whereisit.findthings.ui.MainUiState
+import com.whereisit.findthings.ui.voice.VoiceSearchRoute
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -154,10 +157,12 @@ fun ItemHomeScreen(
     paddingValues: PaddingValues,
     state: MainUiState,
     repository: ItemRepository,
+    voiceSearchRepository: VoiceSearchRepository,
     onLogout: () -> Unit,
     onSaveServerSettings: (String, String, ActiveEndpoint) -> Unit,
     onDiscoverServices: () -> Unit,
     onApplyFilter: (String, Int?, Int?, Int?, Set<Int>) -> Unit,
+    onApplyVoiceSearchResult: (VoiceFinalizeResponse) -> Unit,
     onRefresh: () -> Unit,
     onCreateItem: (ItemFormState) -> Unit,
     onUpdateItem: (ItemFormState) -> Unit,
@@ -174,6 +179,7 @@ fun ItemHomeScreen(
     val context = LocalContext.current
     var settingsPanel by remember { mutableStateOf<SettingsPanel?>(null) }
     var showSearchDialog by remember { mutableStateOf(false) }
+    var showVoiceSearch by remember { mutableStateOf(false) }
     var detailItem by remember { mutableStateOf<ItemDto?>(null) }
     var imagePreview by remember { mutableStateOf<ImagePreviewState?>(null) }
     var fullscreenPreview by remember { mutableStateOf<ImagePreviewState?>(null) }
@@ -270,6 +276,9 @@ fun ItemHomeScreen(
                     Row {
                         IconButton(onClick = { showSearchDialog = true }) {
                             Icon(Icons.Default.Search, null)
+                        }
+                        IconButton(onClick = { showVoiceSearch = true }) {
+                            Icon(painter = painterResource(id = R.drawable.ic_mic_24), contentDescription = "语音搜索")
                         }
                         IconButton(onClick = onOpenCreate) {
                             Icon(Icons.Default.Add, null)
@@ -413,6 +422,17 @@ fun ItemHomeScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showSearchDialog = false }) { Text("关闭") }
+            }
+        )
+    }
+
+    if (showVoiceSearch) {
+        VoiceSearchRoute(
+            repository = voiceSearchRepository,
+            onDismiss = { showVoiceSearch = false },
+            onCompleted = { result ->
+                onApplyVoiceSearchResult(result)
+                showVoiceSearch = false
             }
         )
     }

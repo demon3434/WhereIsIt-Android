@@ -18,7 +18,10 @@ import com.whereisit.findthings.data.repository.AppError
 import com.whereisit.findthings.data.repository.AppTheme
 import com.whereisit.findthings.data.repository.ItemFilter
 import com.whereisit.findthings.data.repository.ItemRepository
+import com.whereisit.findthings.data.repository.PagedItems
 import com.whereisit.findthings.data.repository.SessionRepository
+import com.whereisit.findthings.data.voice.model.VoiceFinalizeResponse
+import com.whereisit.findthings.ui.voice.buildVoiceSearchCandidates
 import java.net.URI
 import kotlin.math.max
 import kotlinx.coroutines.delay
@@ -246,8 +249,77 @@ class MainViewModel(
         refreshItems(safePage)
     }
 
+    fun applyVoiceSearchResult(result: VoiceFinalizeResponse) {
+        val keyword = result.normalizedQuery?.takeIf { it.isNotBlank() } ?: result.finalText
+        val items = result.items
+        _state.update {
+            it.copy(
+                items = items,
+                totalItems = items.size,
+                currentPage = 1,
+                pageSize = max(1, items.size),
+                totalPages = 1,
+                listScrollToTopSignal = it.listScrollToTopSignal + 1,
+                toastMessage = if (keyword.isNotBlank()) "语音搜索：$keyword" else null
+            )
+        }
+    }
+
     fun pullToRefresh() {
         refreshItems(page = state.value.currentPage, showRefreshIndicator = true)
+    }
+
+    fun applySmartVoiceSearchResult(result: VoiceFinalizeResponse) {
+        val candidates = buildVoiceSearchCandidates(result)
+        val preferredKeyword = candidates.firstOrNull().orEmpty()
+        val directItems = result.items
+        if (directItems.isNotEmpty()) {
+            _state.update {
+                it.copy(
+                    items = directItems,
+                    totalItems = directItems.size,
+                    currentPage = 1,
+                    pageSize = max(1, directItems.size),
+                    totalPages = 1,
+                    listScrollToTopSignal = it.listScrollToTopSignal + 1,
+                    toastMessage = if (preferredKeyword.isNotBlank()) "语音搜索：$preferredKeyword" else null
+                )
+            }
+            return
+        }
+
+        if (preferredKeyword.isBlank()) {
+            _state.update { it.copy(toastMessage = "语音识别结果为空，请重试") }
+            return
+        }
+
+        viewModelScope.launch {
+            runSafely {
+                _state.update {
+                    it.copy(
+                        isBusy = true,
+                        currentPage = 1,
+                        listScrollToTopSignal = it.listScrollToTopSignal + 1
+                    )
+                }
+
+                val (matchedKeyword, matchedPage) = searchItemsByVoiceCandidates(candidates)
+                val totalPages = max(1, (matchedPage.total + FIXED_PAGE_SIZE - 1) / FIXED_PAGE_SIZE)
+
+                _state.update {
+                    it.copy(
+                        items = matchedPage.items,
+                        totalItems = matchedPage.total,
+                        currentPage = matchedPage.page.coerceAtLeast(1),
+                        pageSize = FIXED_PAGE_SIZE,
+                        totalPages = totalPages,
+                        isBusy = false,
+                        isRefreshingItems = false,
+                        toastMessage = "语音搜索：$matchedKeyword"
+                    )
+                }
+            }
+        }
     }
 
     fun refreshItems(page: Int = state.value.currentPage, showRefreshIndicator: Boolean = false) {
@@ -412,6 +484,33 @@ class MainViewModel(
                 tags = pack.tags.filter { tag -> tag.isActive }
             )
         }
+    }
+
+    private suspend fun searchItemsByVoiceCandidates(candidates: List<String>): Pair<String, PagedItems> {
+        var lastKeyword = candidates.first()
+        var lastPage = itemRepository.listItems(
+            filter = ItemFilter(keyword = lastKeyword),
+            page = 1,
+            pageSize = FIXED_PAGE_SIZE
+        )
+        if (lastPage.items.isNotEmpty()) {
+            return lastKeyword to lastPage
+        }
+
+        for (candidate in candidates.drop(1)) {
+            val page = itemRepository.listItems(
+                filter = ItemFilter(keyword = candidate),
+                page = 1,
+                pageSize = FIXED_PAGE_SIZE
+            )
+            lastKeyword = candidate
+            lastPage = page
+            if (page.items.isNotEmpty()) {
+                return candidate to page
+            }
+        }
+
+        return lastKeyword to lastPage
     }
 
     private suspend fun runSafely(block: suspend () -> Unit) {

@@ -1,7 +1,30 @@
-﻿# Local crash/heap dumps
-java_pid*.hprof
+# Gradle
+.gradle/
+build/
+*/build/
+
+# Local environment
+local.properties
+
+# Signing
+*.jks
+*.keystore
+keystore/
+
+# IDE
+.idea/
+*.iml
+
+# OS / temp
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.tmp
+
+# Diagnostics
 *.hprof
 
-# Local temporary SDK/Gradle artifacts
-.tmp-sdk/
-.tmp-gradle/
+# APK / bundles
+*.apk
+*.aab
+

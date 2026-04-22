@@ -83,5 +83,13 @@ interface ApiService {
         @Path("itemId") itemId: Int,
         @Path("imageId") imageId: Int
     ): JsonElement
+
+    @Multipart
+    @POST("/api/voice-search/finalize")
+    suspend fun finalizeVoiceSearch(
+        @Header("Authorization") auth: String,
+        @Part("session_id") sessionId: RequestBody? = null,
+        @Part("first_stage_text") firstStageText: RequestBody? = null
+    ): JsonElement
 }
 
