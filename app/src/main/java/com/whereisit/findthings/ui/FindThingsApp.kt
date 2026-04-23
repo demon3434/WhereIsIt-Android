@@ -65,8 +65,6 @@ fun FindThingsApp(container: AppContainer) {
                     onOpenCreate = vm::openCreate,
                     onOpenEdit = vm::openEdit,
                     onCloseForm = vm::closeForm,
-                    onSetDeleteImage = vm::toggleDeleteImage,
-                    onPickImages = vm::setNewImages,
                     onChangeTheme = vm::changeTheme,
                     onChangePassword = vm::changePassword,
                     onChangePage = vm::goToPage

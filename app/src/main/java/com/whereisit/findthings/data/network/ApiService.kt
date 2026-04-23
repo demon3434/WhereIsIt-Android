@@ -62,7 +62,8 @@ interface ApiService {
     suspend fun createItem(
         @Header("Authorization") auth: String,
         @Part("data") data: RequestBody,
-        @Part files: List<MultipartBody.Part>
+        @Part files: List<@JvmSuppressWildcards MultipartBody.Part>,
+        @Part("file_keys") fileKeys: List<@JvmSuppressWildcards RequestBody>
     ): JsonElement
 
     @Multipart
@@ -71,7 +72,8 @@ interface ApiService {
         @Header("Authorization") auth: String,
         @Path("id") id: Int,
         @Part("data") data: RequestBody,
-        @Part files: List<MultipartBody.Part>
+        @Part files: List<@JvmSuppressWildcards MultipartBody.Part>,
+        @Part("file_keys") fileKeys: List<@JvmSuppressWildcards RequestBody>
     ): JsonElement
 
     @DELETE("/api/items/{id}")

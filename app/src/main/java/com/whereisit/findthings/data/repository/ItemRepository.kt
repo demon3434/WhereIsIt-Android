@@ -24,6 +24,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.HttpException
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.util.UUID
 import kotlin.math.max
 
 class ItemRepository(
@@ -135,24 +136,31 @@ class ItemRepository(
         }
     }
 
-    suspend fun createItem(payload: ItemCreatePayload, imageUris: List<Uri>): ItemDto {
+    suspend fun createItem(payload: ItemCreatePayload, imageEntries: List<PendingItemImage>): ItemDto {
         val (baseUrl, auth) = authInfo()
         return guard {
             val api = apiFactory.service(baseUrl)
             val data = gson.toJson(payload).toRequestBody("text/plain".toMediaType())
-            val files = imageUris.mapIndexed { index, uri -> uriToPart(index, uri) }
-            fromJson(unwrapData(api.createItem(auth, data, files)), ItemDto::class.java)
+            val files = imageEntries.mapIndexed { index, entry -> uriToPart(index, entry.uri) }
+            val fileKeys = imageEntries.map { it.fileKey.toRequestBody("text/plain".toMediaType()) }
+            fromJson(unwrapData(api.createItem(auth, data, files, fileKeys)), ItemDto::class.java)
         }
     }
 
-    suspend fun updateItem(itemId: Int, payload: ItemCreatePayload, imageUris: List<Uri>, removeImageIds: List<Int>) {
+    suspend fun updateItem(
+        itemId: Int,
+        payload: ItemCreatePayload,
+        imageEntries: List<PendingItemImage>,
+        removeImageIds: List<Int>
+    ) {
         val (baseUrl, auth) = authInfo()
         guard {
             val api = apiFactory.service(baseUrl)
             removeImageIds.forEach { parseMessageResponse(api.deleteItemImage(auth, itemId, it)) }
             val data = gson.toJson(payload).toRequestBody("text/plain".toMediaType())
-            val files = imageUris.mapIndexed { index, uri -> uriToPart(index, uri) }
-            fromJson(unwrapData(api.updateItem(auth, itemId, data, files)), ItemDto::class.java)
+            val files = imageEntries.mapIndexed { index, entry -> uriToPart(index, entry.uri) }
+            val fileKeys = imageEntries.map { it.fileKey.toRequestBody("text/plain".toMediaType()) }
+            fromJson(unwrapData(api.updateItem(auth, itemId, data, files, fileKeys)), ItemDto::class.java)
         }
     }
 
@@ -463,6 +471,11 @@ data class ItemFilter(
     val roomId: Int? = null,
     val categoryId: Int? = null,
     val tagIds: Set<Int> = emptySet()
+)
+
+data class PendingItemImage(
+    val uri: Uri,
+    val fileKey: String = "img_${UUID.randomUUID().toString().replace("-", "")}"
 )
 
 private fun JsonElement.asStringOrNull(): String? {

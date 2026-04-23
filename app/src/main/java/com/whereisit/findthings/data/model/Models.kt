@@ -65,7 +65,8 @@ data class TagDto(
 
 data class ItemImageDto(
     val id: Int,
-    val url: String
+    val url: String,
+    @SerializedName("display_order") val displayOrder: Int = 0
 )
 
 data class ItemDto(
@@ -96,5 +97,12 @@ data class ItemCreatePayload(
     @SerializedName("room_id") val roomId: Int,
     @SerializedName("location_detail") val locationDetail: String,
     @SerializedName("tag_ids") val tagIds: List<Int>,
-    @SerializedName("tag_names") val tagNames: List<String>
+    @SerializedName("tag_names") val tagNames: List<String>,
+    @SerializedName("image_orders") val imageOrders: List<ItemImageOrderPayload> = emptyList()
+)
+
+data class ItemImageOrderPayload(
+    @SerializedName("image_id") val imageId: Int? = null,
+    @SerializedName("file_key") val fileKey: String? = null,
+    @SerializedName("display_order") val displayOrder: Int
 )

@@ -9,6 +9,7 @@ import com.whereisit.findthings.data.model.CategoryDto
 import com.whereisit.findthings.data.model.HouseDto
 import com.whereisit.findthings.data.model.ItemCreatePayload
 import com.whereisit.findthings.data.model.ItemDto
+import com.whereisit.findthings.data.model.ItemImageOrderPayload
 import com.whereisit.findthings.data.model.RoomDto
 import com.whereisit.findthings.data.model.TagDto
 import com.whereisit.findthings.data.network.DiscoveredService
@@ -19,6 +20,7 @@ import com.whereisit.findthings.data.repository.AppTheme
 import com.whereisit.findthings.data.repository.ItemFilter
 import com.whereisit.findthings.data.repository.ItemRepository
 import com.whereisit.findthings.data.repository.PagedItems
+import com.whereisit.findthings.data.repository.PendingItemImage
 import com.whereisit.findthings.data.repository.SessionRepository
 import com.whereisit.findthings.data.voice.model.VoiceFinalizeResponse
 import com.whereisit.findthings.ui.voice.buildVoiceSearchCandidates
@@ -83,7 +85,7 @@ class MainViewModel(
                     externalUrl = external,
                     endpoint = endpoint,
                     appTheme = state.value.appTheme,
-                    toastMessage = "当前生效服务器网址已修改，已自动退出登录，请重新登录"
+                    toastMessage = "当前生效服务器已变更，请重新登录"
                 )
                 return@launch
             }
@@ -176,7 +178,7 @@ class MainViewModel(
                 )
             }
             val active = normalizedActiveUrl() ?: run {
-                _state.update { it.copy(isBusy = false, loginError = "请先填写生效服务器地址") }
+                _state.update { it.copy(isBusy = false, loginError = "请先填写服务器地址") }
                 return@launch
             }
             try {
@@ -339,9 +341,7 @@ class MainViewModel(
                 it.copy(
                     showForm = true,
                     editingItem = null,
-                    form = ItemFormState(quantity = "1"),
-                    newImageUris = emptyList(),
-                    removeImageIds = emptySet()
+                    form = ItemFormState(quantity = "1")
                 )
             }
         }
@@ -363,36 +363,26 @@ class MainViewModel(
                         roomId = item.roomId,
                         categoryId = item.categoryId,
                         selectedTagIds = item.tags.map { tag -> tag.id }.toSet()
-                    ),
-                    removeImageIds = emptySet(),
-                    newImageUris = emptyList()
+                    )
                 )
             }
         }
     }
 
     fun closeForm() = _state.update {
-        it.copy(showForm = false, removeImageIds = emptySet(), newImageUris = emptyList())
+        it.copy(showForm = false)
     }
 
-    fun setNewImages(uris: List<Uri>) = _state.update { it.copy(newImageUris = uris.take(9)) }
-
-    fun toggleDeleteImage(imageId: Int, checked: Boolean) = _state.update {
-        it.copy(removeImageIds = if (checked) it.removeImageIds + imageId else it.removeImageIds - imageId)
-    }
-
-    fun createItem(form: ItemFormState) {
+    fun createItem(form: ItemFormState, imageEntries: List<PendingItemImage>) {
         viewModelScope.launch {
             runSafely {
                 _state.update { it.copy(isBusy = true) }
-                itemRepository.createItem(buildPayload(form), state.value.newImageUris)
+                itemRepository.createItem(buildPayload(form, imageEntries, emptyList()), imageEntries)
                 _state.update {
                     it.copy(
                         showForm = false,
                         isBusy = false,
                         toastMessage = "物品已创建",
-                        newImageUris = emptyList(),
-                        removeImageIds = emptySet(),
                         currentPage = 1
                     )
                 }
@@ -404,19 +394,25 @@ class MainViewModel(
         }
     }
 
-    fun updateItem(form: ItemFormState) {
+    fun updateItem(form: ItemFormState, imageEntries: List<FormImageEntryState>, removeImageIds: List<Int>) {
         val itemId = state.value.editingItem?.id ?: return
         viewModelScope.launch {
             runSafely {
                 _state.update { it.copy(isBusy = true) }
-                itemRepository.updateItem(itemId, buildPayload(form), state.value.newImageUris, state.value.removeImageIds.toList())
+                val newImages = imageEntries
+                    .filter { it.kind == FormImageEntryKind.NEW && it.uri != null && it.fileKey != null }
+                    .map { PendingItemImage(uri = it.uri!!, fileKey = it.fileKey!!) }
+                itemRepository.updateItem(
+                    itemId = itemId,
+                    payload = buildPayload(form, newImages, imageEntries),
+                    imageEntries = newImages,
+                    removeImageIds = removeImageIds
+                )
                 _state.update {
                     it.copy(
                         showForm = false,
                         isBusy = false,
-                        toastMessage = "物品已更新",
-                        newImageUris = emptyList(),
-                        removeImageIds = emptySet()
+                        toastMessage = "物品已更新"
                     )
                 }
                 refreshItems()
@@ -525,7 +521,7 @@ class MainViewModel(
                     isBusy = false,
                     isRefreshingItems = false,
                     loginError = e.message,
-                    toastMessage = if (isLoggedInNow) "登录已过期，3秒后跳转到登录页" else e.message,
+                    toastMessage = if (isLoggedInNow) "登录已过期，3 秒后返回登录页" else e.message,
                     pendingSessionExpireRedirect = if (isLoggedInNow) true else it.pendingSessionExpireRedirect
                 )
             }
@@ -549,7 +545,11 @@ class MainViewModel(
         }
     }
 
-    private fun buildPayload(form: ItemFormState): ItemCreatePayload {
+    private fun buildPayload(
+        form: ItemFormState,
+        newImages: List<PendingItemImage>,
+        imageEntries: List<FormImageEntryState>
+    ): ItemCreatePayload {
         val name = form.name.trim()
         val location = form.locationDetail.trim()
         if (name.isBlank()) throw AppError.Validation("请填写物品名称")
@@ -565,7 +565,34 @@ class MainViewModel(
             .filter { it.isNotBlank() }
             .distinctBy { it.lowercase() }
             .sorted()
-        return ItemCreatePayload(name, form.brand.trim(), quantity, categoryId, houseId, roomId, location, tagIds, tagNames)
+        val imageOrders = if (imageEntries.isNotEmpty()) {
+            imageEntries.mapIndexed { index, entry ->
+                ItemImageOrderPayload(
+                    imageId = entry.imageId,
+                    fileKey = if (entry.kind == FormImageEntryKind.NEW) entry.fileKey else null,
+                    displayOrder = index + 1
+                )
+            }
+        } else {
+            newImages.mapIndexed { index, entry ->
+                ItemImageOrderPayload(
+                    fileKey = entry.fileKey,
+                    displayOrder = index + 1
+                )
+            }
+        }
+        return ItemCreatePayload(
+            name = name,
+            brand = form.brand.trim(),
+            quantity = quantity,
+            categoryId = categoryId,
+            houseId = houseId,
+            roomId = roomId,
+            locationDetail = location,
+            tagIds = tagIds,
+            tagNames = tagNames,
+            imageOrders = imageOrders
+        )
     }
 
     private fun normalizedActiveUrl(): String? {
@@ -649,8 +676,6 @@ data class MainUiState(
     val showForm: Boolean = false,
     val editingItem: ItemDto? = null,
     val form: ItemFormState = ItemFormState(quantity = "1"),
-    val newImageUris: List<Uri> = emptyList(),
-    val removeImageIds: Set<Int> = emptySet(),
     val isRefreshingItems: Boolean = false,
     val listScrollToTopSignal: Int = 0,
     val isDiscoveringServices: Boolean = false,
@@ -671,3 +696,17 @@ data class ItemFormState(
     val customTagNames: Set<String> = emptySet()
 )
 
+enum class FormImageEntryKind {
+    EXISTING,
+    NEW
+}
+
+data class FormImageEntryState(
+    val id: String,
+    val kind: FormImageEntryKind,
+    val imageId: Int? = null,
+    val imageUrl: String? = null,
+    val uri: Uri? = null,
+    val fileKey: String? = null,
+    val displayOrder: Int = 0
+)

@@ -14,6 +14,7 @@ import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
@@ -84,6 +85,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -102,6 +104,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -115,6 +118,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.zIndex
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
@@ -129,12 +133,17 @@ import com.whereisit.findthings.data.network.DiscoveredService
 import com.whereisit.findthings.data.repository.ActiveEndpoint
 import com.whereisit.findthings.data.repository.AppTheme
 import com.whereisit.findthings.data.repository.ItemRepository
+import com.whereisit.findthings.data.repository.PendingItemImage
 import com.whereisit.findthings.data.voice.VoiceSearchRepository
 import com.whereisit.findthings.data.voice.model.VoiceFinalizeResponse
+import com.whereisit.findthings.ui.FormImageEntryKind
+import com.whereisit.findthings.ui.FormImageEntryState
 import com.whereisit.findthings.ui.ItemFormState
 import com.whereisit.findthings.ui.MainUiState
 import com.whereisit.findthings.ui.voice.VoiceSearchRoute
 import java.io.File
+import java.util.UUID
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 private enum class SettingsPanel {
@@ -164,14 +173,12 @@ fun ItemHomeScreen(
     onApplyFilter: (String, Int?, Int?, Int?, Set<Int>) -> Unit,
     onApplyVoiceSearchResult: (VoiceFinalizeResponse) -> Unit,
     onRefresh: () -> Unit,
-    onCreateItem: (ItemFormState) -> Unit,
-    onUpdateItem: (ItemFormState) -> Unit,
+    onCreateItem: (ItemFormState, List<PendingItemImage>) -> Unit,
+    onUpdateItem: (ItemFormState, List<FormImageEntryState>, List<Int>) -> Unit,
     onDeleteItem: (ItemDto) -> Unit,
     onOpenCreate: () -> Unit,
     onOpenEdit: (ItemDto) -> Unit,
     onCloseForm: () -> Unit,
-    onSetDeleteImage: (Int, Boolean) -> Unit,
-    onPickImages: (List<Uri>) -> Unit,
     onChangeTheme: (AppTheme) -> Unit,
     onChangePassword: (String) -> Unit,
     onChangePage: (Int) -> Unit
@@ -184,7 +191,6 @@ fun ItemHomeScreen(
     var imagePreview by remember { mutableStateOf<ImagePreviewState?>(null) }
     var fullscreenPreview by remember { mutableStateOf<ImagePreviewState?>(null) }
     var pendingDeleteItem by remember { mutableStateOf<ItemDto?>(null) }
-    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
     var keyword by remember(state.filter.keyword) { mutableStateOf(state.filter.keyword) }
     var houseId by remember(state.filter.houseId) { mutableStateOf(state.filter.houseId) }
@@ -230,31 +236,6 @@ fun ItemHomeScreen(
             itemListState.scrollToItem(0)
             handledScrollSignal = state.listScrollToTopSignal
         }
-    }
-
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(9)) { uris ->
-        onPickImages(uris)
-    }
-    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val captured = pendingCameraUri
-        pendingCameraUri = null
-        if (success && captured != null) {
-            val merged = (state.newImageUris + captured).distinct().take(9)
-            onPickImages(merged)
-        }
-    }
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (!granted) {
-            Toast.makeText(context, "未授予相机权限，无法拍照", Toast.LENGTH_SHORT).show()
-            return@rememberLauncherForActivityResult
-        }
-        val uri = createTempImageUri(context)
-        if (uri == null) {
-            Toast.makeText(context, "无法创建拍照文件，请稍后重试", Toast.LENGTH_SHORT).show()
-            return@rememberLauncherForActivityResult
-        }
-        pendingCameraUri = uri
-        cameraLauncher.launch(uri)
     }
 
     Scaffold(
@@ -521,27 +502,8 @@ fun ItemHomeScreen(
             state = state,
             repository = repository,
             onDismiss = onCloseForm,
-            onPickImages = {
-                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            },
-            onChangeNewImages = onPickImages,
-            onTakePhoto = {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                    val uri = createTempImageUri(context)
-                    if (uri == null) {
-                        Toast.makeText(context, "无法创建拍照文件，请稍后重试", Toast.LENGTH_SHORT).show()
-                    } else {
-                        pendingCameraUri = uri
-                        cameraLauncher.launch(uri)
-                    }
-                } else {
-                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                }
-            },
-            onSubmit = { form ->
-                if (state.editingItem == null) onCreateItem(form) else onUpdateItem(form)
-            },
-            onSetDeleteImage = onSetDeleteImage
+            onCreateItem = onCreateItem,
+            onUpdateItem = onUpdateItem
         )
     }
 
@@ -1176,7 +1138,7 @@ private fun ItemThumbnail(
     repository: ItemRepository,
     onClick: () -> Unit
 ) {
-    val firstImage = item.images.firstOrNull()
+    val firstImage = sortedItemImages(item.images).firstOrNull()
     val modifier = Modifier
         .width(96.dp)
         .height(96.dp)
@@ -1300,7 +1262,7 @@ private fun ItemImageViewerDialog(
     onOpenFullscreen: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val images = item.images
+    val images = sortedItemImages(item.images)
     if (images.isEmpty()) return
 
     AlertDialog(
@@ -1350,10 +1312,11 @@ private fun ItemDetailDialog(
                 Text("录入人：${item.ownerDisplayName}")
                 Text("更新日期：${formatDate(item.updatedAt)}")
 
-                if (item.images.isNotEmpty()) {
+                val orderedImages = sortedItemImages(item.images)
+                if (orderedImages.isNotEmpty()) {
                     Text("照片浏览")
                     ThumbnailImageBrowser(
-                        images = item.images,
+                        images = orderedImages,
                         imageBase = if (state.endpoint == ActiveEndpoint.INTERNAL) state.internalUrl else state.externalUrl,
                         repository = repository,
                         initialIndex = 0,
@@ -1451,7 +1414,7 @@ private fun ItemImageFullscreenDialog(
     repository: ItemRepository,
     onDismiss: () -> Unit
 ) {
-    val images = item.images
+    val images = sortedItemImages(item.images)
     if (images.isEmpty()) return
     val base = if (state.endpoint == ActiveEndpoint.INTERNAL) state.internalUrl else state.externalUrl
     val normalizedBase = if (base.endsWith('/')) base else "$base/"
@@ -1763,17 +1726,20 @@ private fun ItemFormDialog(
     state: MainUiState,
     repository: ItemRepository,
     onDismiss: () -> Unit,
-    onPickImages: () -> Unit,
-    onChangeNewImages: (List<Uri>) -> Unit,
-    onTakePhoto: () -> Unit,
-    onSubmit: (ItemFormState) -> Unit,
-    onSetDeleteImage: (Int, Boolean) -> Unit
+    onCreateItem: (ItemFormState, List<PendingItemImage>) -> Unit,
+    onUpdateItem: (ItemFormState, List<FormImageEntryState>, List<Int>) -> Unit
 ) {
+    val context = LocalContext.current
     var form by remember(state.form, state.editingItem?.id) { mutableStateOf(state.form) }
+    var imageEntries by remember(state.editingItem?.id) {
+        mutableStateOf(buildInitialFormImageEntries(state.editingItem))
+    }
+    var removeImageIds by remember(state.editingItem?.id) { mutableStateOf(setOf<Int>()) }
     var showSourceDialog by remember { mutableStateOf(false) }
     var pendingDeleteImageId by remember { mutableStateOf<Int?>(null) }
     var showUpdateConfirm by remember { mutableStateOf(false) }
     val imageBase = if (state.endpoint == ActiveEndpoint.INTERNAL) state.internalUrl else state.externalUrl
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     val formScrollState = rememberScrollState()
     val formScrollbarWidth by animateDpAsState(
         targetValue = if (formScrollState.isScrollInProgress) 3.dp else 1.dp,
@@ -1801,6 +1767,54 @@ private fun ItemFormDialog(
             .flatMap { item -> item.tags.map { tag -> tag.id } }
             .distinct()
     }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(9)) { uris ->
+        val remain = (9 - imageEntries.size).coerceAtLeast(0)
+        if (remain <= 0) {
+            Toast.makeText(context, "图片最多 9 张", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        val accepted = uris.distinct().take(remain).map { uri ->
+            FormImageEntryState(
+                id = "new_${UUID.randomUUID().toString().replace("-", "")}",
+                kind = FormImageEntryKind.NEW,
+                uri = uri,
+                fileKey = "img_${UUID.randomUUID().toString().replace("-", "")}"
+            )
+        }
+        imageEntries = imageEntries + accepted
+        if (uris.size > remain) {
+            Toast.makeText(context, "最多保留 9 张图片，超出部分已忽略", Toast.LENGTH_SHORT).show()
+        }
+    }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val captured = pendingCameraUri
+        pendingCameraUri = null
+        if (success && captured != null) {
+            if (imageEntries.size >= 9) {
+                Toast.makeText(context, "图片最多 9 张", Toast.LENGTH_SHORT).show()
+            } else {
+                imageEntries = imageEntries + FormImageEntryState(
+                    id = "new_${UUID.randomUUID().toString().replace("-", "")}",
+                    kind = FormImageEntryKind.NEW,
+                    uri = captured,
+                    fileKey = "img_${UUID.randomUUID().toString().replace("-", "")}"
+                )
+            }
+        }
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) {
+            Toast.makeText(context, "未授予相机权限，无法拍照", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        val uri = createTempImageUri(context)
+        if (uri == null) {
+            Toast.makeText(context, "无法创建拍照文件，请稍后重试", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        pendingCameraUri = uri
+        cameraLauncher.launch(uri)
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1808,7 +1822,10 @@ private fun ItemFormDialog(
         confirmButton = {
             TextButton(onClick = {
                 if (state.editingItem == null) {
-                    onSubmit(form)
+                    val pendingImages = imageEntries
+                        .filter { it.kind == FormImageEntryKind.NEW && it.uri != null && it.fileKey != null }
+                        .map { PendingItemImage(uri = it.uri!!, fileKey = it.fileKey!!) }
+                    onCreateItem(form, pendingImages)
                 } else {
                     showUpdateConfirm = true
                 }
@@ -1879,64 +1896,44 @@ private fun ItemFormDialog(
                         onCustomTagNamesChange = { form = form.copy(customTagNames = it) }
                     )
 
-                    if (state.editingItem?.images?.isNotEmpty() == true) {
-                        Text("现有图片")
-                        state.editingItem.images.forEach { image ->
-                            if (image.id !in state.removeImageIds) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    val base = if (imageBase.endsWith('/')) imageBase else "$imageBase/"
-                                    AsyncImage(
-                                        model = repository.fullImageUrl(base, image.url),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(70.dp),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                    Spacer(Modifier.weight(1f))
-                                    IconButton(onClick = { pendingDeleteImageId = image.id }) {
-                                        Icon(
-                                            imageVector = Icons.Default.Delete,
-                                            contentDescription = "删除图片",
-                                            tint = MaterialTheme.colorScheme.error
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedButton(onClick = { showSourceDialog = true }) {
                             Text("拍照/上传照片")
                         }
-                        Text("已选 ${state.newImageUris.size} 张")
+                        Text("当前共 ${imageEntries.size} 张")
                     }
-                    state.newImageUris.forEachIndexed { index, uri ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Text(
+                        text = "长按图片可拖动调整顺序，序号 1 会作为物品封面图。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (imageEntries.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(120.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+                            contentAlignment = Alignment.Center
                         ) {
-                            AsyncImage(
-                                model = uri,
-                                contentDescription = null,
-                                modifier = Modifier.size(70.dp),
-                                contentScale = ContentScale.Crop
-                            )
-                            Spacer(Modifier.weight(1f))
-                            IconButton(onClick = {
-                                onChangeNewImages(state.newImageUris.filterIndexed { i, _ -> i != index })
-                            }) {
-                                Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = "删除图片",
-                                    tint = MaterialTheme.colorScheme.error
-                                )
-                            }
+                            Text("暂无图片", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                    } else {
+                        SortableImageGrid(
+                            entries = imageEntries,
+                            imageBase = imageBase,
+                            repository = repository,
+                            onMove = { fromIndex, toIndex ->
+                                imageEntries = moveImageEntry(imageEntries, fromIndex, toIndex)
+                            },
+                            onDelete = { entry ->
+                                if (entry.kind == FormImageEntryKind.EXISTING && entry.imageId != null) {
+                                    pendingDeleteImageId = entry.imageId
+                                } else {
+                                    imageEntries = imageEntries.filterNot { it.id == entry.id }
+                                }
+                            }
+                        )
                     }
                 }
                 Box(
@@ -1965,14 +1962,24 @@ private fun ItemFormDialog(
                     Button(
                         onClick = {
                             showSourceDialog = false
-                            onTakePhoto()
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                val uri = createTempImageUri(context)
+                                if (uri == null) {
+                                    Toast.makeText(context, "无法创建拍照文件，请稍后重试", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    pendingCameraUri = uri
+                                    cameraLauncher.launch(uri)
+                                }
+                            } else {
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("拍照") }
                     OutlinedButton(
                         onClick = {
                             showSourceDialog = false
-                            onPickImages()
+                            picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("从相册选择") }
@@ -1991,7 +1998,9 @@ private fun ItemFormDialog(
             text = { Text("确认删除这张现有图片吗？保存后生效。") },
             confirmButton = {
                 TextButton(onClick = {
-                    onSetDeleteImage(pendingDeleteImageId!!, true)
+                    val targetId = pendingDeleteImageId!!
+                    removeImageIds = removeImageIds + targetId
+                    imageEntries = imageEntries.filterNot { it.imageId == targetId }
                     pendingDeleteImageId = null
                 }) { Text("确认删除") }
             },
@@ -2009,7 +2018,7 @@ private fun ItemFormDialog(
             confirmButton = {
                 TextButton(onClick = {
                     showUpdateConfirm = false
-                    onSubmit(form)
+                    onUpdateItem(form, imageEntries, removeImageIds.toList())
                 }) { Text("确认保存") }
             },
             dismissButton = {
@@ -2017,6 +2026,279 @@ private fun ItemFormDialog(
             }
         )
     }
+}
+
+private fun buildInitialFormImageEntries(item: ItemDto?): List<FormImageEntryState> {
+    return sortedItemImages(item?.images.orEmpty()).map { image ->
+        FormImageEntryState(
+            id = "existing_${image.id}",
+            kind = FormImageEntryKind.EXISTING,
+            imageId = image.id,
+            imageUrl = image.url,
+            displayOrder = image.displayOrder
+        )
+    }
+}
+
+private fun moveImageEntry(
+    entries: List<FormImageEntryState>,
+    fromIndex: Int,
+    toIndex: Int
+): List<FormImageEntryState> {
+    if (fromIndex == toIndex || fromIndex !in entries.indices || toIndex !in entries.indices) return entries
+    val next = entries.toMutableList()
+    val moved = next.removeAt(fromIndex)
+    next.add(toIndex, moved)
+    return next
+}
+
+@Composable
+private fun SortableImageGrid(
+    entries: List<FormImageEntryState>,
+    imageBase: String,
+    repository: ItemRepository,
+    onMove: (Int, Int) -> Unit,
+    onDelete: (FormImageEntryState) -> Unit
+) {
+    if (entries.isEmpty()) return
+
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val columns = 3
+        val gap = 10.dp
+        val itemSize = ((maxWidth - gap * (columns - 1)) / columns).coerceAtLeast(72.dp)
+        val rows = ((entries.size + columns - 1) / columns).coerceAtLeast(1)
+        val containerHeight = itemSize * rows + gap * (rows - 1)
+        val cellStep = itemSize + gap
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        var draggingId by remember(entries.map { it.id }) { mutableStateOf<String?>(null) }
+        var dragStartIndex by remember(entries.map { it.id }) { mutableIntStateOf(-1) }
+        var dragTargetIndex by remember(entries.map { it.id }) { mutableIntStateOf(-1) }
+        var dragOffsetX by remember { mutableFloatStateOf(0f) }
+        var dragOffsetY by remember { mutableFloatStateOf(0f) }
+
+        fun leftFor(index: Int): Dp = cellStep * (index % columns)
+        fun topFor(index: Int): Dp = cellStep * (index / columns)
+
+        val draggingEntry = remember(entries, draggingId) {
+            entries.firstOrNull { it.id == draggingId }
+        }
+        val projectedEntries = remember(entries, draggingId, dragStartIndex, dragTargetIndex) {
+            if (draggingId == null || dragStartIndex !in entries.indices) {
+                entries
+            } else {
+                val target = dragTargetIndex.coerceIn(0, entries.lastIndex)
+                val moved = entries[dragStartIndex]
+                buildList {
+                    addAll(entries)
+                    removeAt(dragStartIndex)
+                    add(target, moved)
+                }
+            }
+        }
+        val projectedIndexById = remember(projectedEntries) {
+            projectedEntries.mapIndexed { index, entry -> entry.id to index }.toMap()
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(containerHeight)
+        ) {
+            entries.forEachIndexed { index, entry ->
+                val isDragging = draggingId == entry.id
+                val projectedIndex = if (isDragging) {
+                    dragStartIndex.coerceAtLeast(0)
+                } else {
+                    projectedIndexById[entry.id] ?: index
+                }
+                val baseX = leftFor(projectedIndex)
+                val baseY = topFor(projectedIndex)
+                val animatedX by animateDpAsState(targetValue = baseX, label = "imageCardX")
+                val animatedY by animateDpAsState(targetValue = baseY, label = "imageCardY")
+
+                Box(
+                    modifier = Modifier
+                        .offset(x = animatedX, y = animatedY)
+                        .size(itemSize)
+                        .graphicsLayer {
+                            alpha = if (isDragging) 0f else 1f
+                        }
+                        .zIndex(if (isDragging) 1f else 0f)
+                        .pointerInput(entries, entry.id) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = {
+                                    draggingId = entry.id
+                                    dragStartIndex = entries.indexOfFirst { it.id == entry.id }
+                                    dragTargetIndex = dragStartIndex
+                                    dragOffsetX = 0f
+                                    dragOffsetY = 0f
+                                },
+                                onDragCancel = {
+                                    draggingId = null
+                                    dragStartIndex = -1
+                                    dragTargetIndex = -1
+                                    dragOffsetX = 0f
+                                    dragOffsetY = 0f
+                                },
+                                onDragEnd = {
+                                    val fromIndex = dragStartIndex
+                                    val toIndex = dragTargetIndex
+                                    if (fromIndex in entries.indices && toIndex in entries.indices && fromIndex != toIndex) {
+                                        onMove(fromIndex, toIndex)
+                                    }
+                                    draggingId = null
+                                    dragStartIndex = -1
+                                    dragTargetIndex = -1
+                                    dragOffsetX = 0f
+                                    dragOffsetY = 0f
+                                },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    if (draggingId != entry.id) return@detectDragGesturesAfterLongPress
+                                    dragOffsetX += dragAmount.x
+                                    dragOffsetY += dragAmount.y
+
+                                    val currentIndex = dragStartIndex
+                                    if (currentIndex !in entries.indices) return@detectDragGesturesAfterLongPress
+
+                                    val stepPx = with(density) { cellStep.toPx() }
+                                    val itemPx = with(density) { itemSize.toPx() }
+                                    val currentCenterX = (currentIndex % columns) * stepPx + dragOffsetX + itemPx / 2f
+                                    val currentCenterY = (currentIndex / columns) * stepPx + dragOffsetY + itemPx / 2f
+                                    val targetColumn = (currentCenterX / stepPx).toInt().coerceIn(0, columns - 1)
+                                    val targetRow = (currentCenterY / stepPx).toInt().coerceIn(0, rows - 1)
+                                    val targetIndex = (targetRow * columns + targetColumn).coerceIn(0, entries.lastIndex)
+                                    dragTargetIndex = targetIndex
+                                }
+                            )
+                        }
+                ) {
+                    SortableImageCard(
+                        entry = entry,
+                        imageBase = imageBase,
+                        repository = repository,
+                        index = projectedIndex,
+                        isDragging = false,
+                        onDelete = { onDelete(entry) }
+                    )
+                }
+            }
+
+            draggingEntry?.let { entry ->
+                val startIndex = dragStartIndex.coerceAtLeast(0)
+                val baseX = leftFor(startIndex)
+                val baseY = topFor(startIndex)
+                val scale by animateFloatAsState(
+                    targetValue = 1.04f,
+                    label = "draggingCardScale"
+                )
+                Box(
+                    modifier = Modifier
+                        .offset(x = baseX, y = baseY)
+                        .offset { IntOffset(dragOffsetX.roundToInt(), dragOffsetY.roundToInt()) }
+                        .size(itemSize)
+                        .zIndex(2f)
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            shadowElevation = 20f
+                        }
+                ) {
+                    SortableImageCard(
+                        entry = entry,
+                        imageBase = imageBase,
+                        repository = repository,
+                        index = (dragTargetIndex.takeIf { it >= 0 } ?: startIndex),
+                        isDragging = true,
+                        onDelete = { onDelete(entry) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SortableImageCard(
+    entry: FormImageEntryState,
+    imageBase: String,
+    repository: ItemRepository,
+    index: Int,
+    isDragging: Boolean,
+    onDelete: () -> Unit
+) {
+    val imageModel = when {
+        entry.kind == FormImageEntryKind.NEW && entry.uri != null -> entry.uri
+        !entry.imageUrl.isNullOrBlank() -> repository.fullImageUrl(normalizedImageBase(imageBase), entry.imageUrl)
+        else -> null
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(14.dp))
+            .background(
+                if (isDragging) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f)
+                else MaterialTheme.colorScheme.surface
+            )
+            .border(
+                width = if (isDragging) 2.dp else 1.dp,
+                color = if (isDragging) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+                shape = RoundedCornerShape(14.dp)
+            )
+    ) {
+        if (imageModel != null) {
+            AsyncImage(
+                model = imageModel,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(enabled = false, onClick = {})
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .padding(4.dp)
+                .background(Color(0xCC0F172A), RoundedCornerShape(999.dp))
+                .align(Alignment.TopStart)
+        ) {
+            Text(
+                text = "${index + 1}",
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .padding(4.dp)
+                .size(22.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color(0xFFDC2626))
+                .align(Alignment.BottomEnd)
+                .clickable(onClick = onDelete),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "删除图片",
+                tint = Color.White,
+                modifier = Modifier.size(12.dp)
+            )
+        }
+    }
+}
+
+private fun normalizedImageBase(base: String): String {
+    return if (base.endsWith('/')) base else "$base/"
+}
+
+private fun sortedItemImages(images: List<ItemImageDto>): List<ItemImageDto> {
+    return images.sortedWith(compareBy<ItemImageDto> { if (it.displayOrder > 0) it.displayOrder else Int.MAX_VALUE }.thenBy { it.id })
 }
 
 private fun formatDate(raw: String): String {
