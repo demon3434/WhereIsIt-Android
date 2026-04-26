@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 class MainViewModel(
+    private val appContainer: AppContainer,
     private val sessionRepository: SessionRepository,
     private val itemRepository: ItemRepository,
     private val serviceAutoDiscovery: ServiceAutoDiscovery
@@ -50,7 +51,8 @@ class MainViewModel(
                     externalUrl = session.externalUrl,
                     endpoint = session.activeEndpoint,
                     appTheme = session.appTheme,
-                    isLoggedIn = session.token.isNotBlank()
+                    isLoggedIn = session.token.isNotBlank(),
+                    biometricUnlockEnabled = session.biometricUnlockEnabled
                 )
             }
             if (session.token.isNotBlank()) {
@@ -66,6 +68,13 @@ class MainViewModel(
     fun setInternalUrl(value: String) = _state.update { it.copy(internalUrl = value) }
     fun setExternalUrl(value: String) = _state.update { it.copy(externalUrl = value) }
     fun setEndpoint(value: ActiveEndpoint) = _state.update { it.copy(endpoint = value) }
+
+    fun setBiometricUnlockEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            sessionRepository.saveBiometricUnlockEnabled(enabled)
+            _state.update { it.copy(biometricUnlockEnabled = enabled) }
+        }
+    }
 
     fun saveServerSettings(internal: String, external: String, endpoint: ActiveEndpoint) {
         viewModelScope.launch {
@@ -85,6 +94,7 @@ class MainViewModel(
                     externalUrl = external,
                     endpoint = endpoint,
                     appTheme = state.value.appTheme,
+                    biometricUnlockEnabled = state.value.biometricUnlockEnabled,
                     toastMessage = "当前生效服务器已变更，请重新登录"
                 )
                 return@launch
@@ -183,10 +193,19 @@ class MainViewModel(
             }
             try {
                 sessionRepository.saveServerSettings(state.value.internalUrl, state.value.externalUrl, state.value.endpoint)
-                val token = itemRepository.login(username.trim(), password, active).accessToken
+                val trimmedUsername = username.trim()
+                val token = itemRepository.login(trimmedUsername, password, active).accessToken
                 itemRepository.setRuntimeAuth(active, token)
                 sessionRepository.setToken(token)
                 sessionRepository.saveLastSuccessBaseUrl(active)
+                sessionRepository.saveCurrentUser(trimmedUsername)
+                runCatching { itemRepository.me() }.onSuccess { me ->
+                    sessionRepository.saveCurrentUser(
+                        username = me.username,
+                        fullName = me.fullName,
+                        nickname = me.nickname
+                    )
+                }
                 _state.update { it.copy(isLoggedIn = true, isBusy = false, showDiscoveryDialog = false) }
                 loadHome()
             } catch (e: AppError.Network) {
@@ -221,13 +240,13 @@ class MainViewModel(
 
     fun logout() {
         viewModelScope.launch {
-            itemRepository.clearRuntimeAuth()
-            sessionRepository.clearToken()
+            appContainer.logout()
             _state.value = MainUiState(
                 internalUrl = state.value.internalUrl,
                 externalUrl = state.value.externalUrl,
                 endpoint = state.value.endpoint,
-                appTheme = state.value.appTheme
+                appTheme = state.value.appTheme,
+                biometricUnlockEnabled = state.value.biometricUnlockEnabled
             )
             discoverLocalServices(autoPrompt = true)
         }
@@ -435,7 +454,12 @@ class MainViewModel(
     private suspend fun loadHome() {
         runSafely {
             _state.update { it.copy(isBusy = true) }
-            itemRepository.me()
+            val me = itemRepository.me()
+            sessionRepository.saveCurrentUser(
+                username = me.username,
+                fullName = me.fullName,
+                nickname = me.nickname
+            )
             loadMetaOnly()
             loadItemsPage(1)
         }
@@ -528,14 +552,14 @@ class MainViewModel(
             if (shouldScheduleLogout) {
                 viewModelScope.launch {
                     delay(3000)
-                    itemRepository.clearRuntimeAuth()
-                    sessionRepository.clearToken()
+                    appContainer.logout()
                     val latest = state.value
                     _state.value = MainUiState(
                         internalUrl = latest.internalUrl,
                         externalUrl = latest.externalUrl,
                         endpoint = latest.endpoint,
-                        appTheme = latest.appTheme
+                        appTheme = latest.appTheme,
+                        biometricUnlockEnabled = latest.biometricUnlockEnabled
                     )
                     discoverLocalServices(autoPrompt = true)
                 }
@@ -642,6 +666,7 @@ class MainViewModel(
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 @Suppress("UNCHECKED_CAST")
                 return MainViewModel(
+                    appContainer = container,
                     sessionRepository = container.sessionRepository,
                     itemRepository = container.itemRepository,
                     serviceAutoDiscovery = container.serviceAutoDiscovery
@@ -658,6 +683,7 @@ data class MainUiState(
     val externalUrl: String = "",
     val endpoint: ActiveEndpoint = ActiveEndpoint.INTERNAL,
     val appTheme: AppTheme = AppTheme.SAND,
+    val biometricUnlockEnabled: Boolean = false,
     val loginError: String? = null,
     val canSwitchRetry: Boolean = false,
     val lastLoginUsername: String = "",

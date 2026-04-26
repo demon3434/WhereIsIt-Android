@@ -28,4 +28,8 @@ class ApiFactory {
                 .create(ApiService::class.java)
         }
     }
+
+    fun clearCache() {
+        cache.clear()
+    }
 }

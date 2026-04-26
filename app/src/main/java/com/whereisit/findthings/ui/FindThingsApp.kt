@@ -67,6 +67,7 @@ fun FindThingsApp(container: AppContainer) {
                     onCloseForm = vm::closeForm,
                     onChangeTheme = vm::changeTheme,
                     onChangePassword = vm::changePassword,
+                    onChangeBiometricUnlock = vm::setBiometricUnlockEnabled,
                     onChangePage = vm::goToPage
                 )
             }

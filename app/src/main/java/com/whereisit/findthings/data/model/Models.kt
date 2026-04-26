@@ -16,10 +16,6 @@ data class MessageResponse(
     val message: String
 )
 
-data class HealthResponse(
-    val status: String
-)
-
 data class UserMe(
     val id: Int,
     val username: String,

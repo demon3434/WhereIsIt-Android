@@ -15,6 +15,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
@@ -50,14 +52,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
@@ -81,6 +83,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -89,6 +92,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -121,6 +125,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
 import coil.compose.AsyncImage
 import com.whereisit.findthings.R
 import com.whereisit.findthings.data.model.CategoryDto
@@ -140,6 +145,12 @@ import com.whereisit.findthings.ui.FormImageEntryKind
 import com.whereisit.findthings.ui.FormImageEntryState
 import com.whereisit.findthings.ui.ItemFormState
 import com.whereisit.findthings.ui.MainUiState
+import com.whereisit.findthings.ui.security.AppLockSession
+import com.whereisit.findthings.ui.security.biometricAvailability
+import com.whereisit.findthings.ui.security.canShowAppUnlockSwitch
+import com.whereisit.findthings.ui.security.isPromptNoBiometricsError
+import com.whereisit.findthings.ui.security.launchAppBiometricPrompt
+import com.whereisit.findthings.ui.security.openSystemSecuritySettings
 import com.whereisit.findthings.ui.voice.VoiceSearchRoute
 import java.io.File
 import java.util.UUID
@@ -181,9 +192,11 @@ fun ItemHomeScreen(
     onCloseForm: () -> Unit,
     onChangeTheme: (AppTheme) -> Unit,
     onChangePassword: (String) -> Unit,
+    onChangeBiometricUnlock: (Boolean) -> Unit,
     onChangePage: (Int) -> Unit
 ) {
     val context = LocalContext.current
+    val canShowUnlockSwitch = canShowAppUnlockSwitch(context)
     var settingsPanel by remember { mutableStateOf<SettingsPanel?>(null) }
     var showSearchDialog by remember { mutableStateOf(false) }
     var showVoiceSearch by remember { mutableStateOf(false) }
@@ -451,10 +464,13 @@ fun ItemHomeScreen(
 
     when (settingsPanel) {
         SettingsPanel.MENU -> SettingsMenuDialog(
+            state = state,
+            supportsBiometricUnlock = canShowUnlockSwitch,
             onDismiss = { settingsPanel = null },
             onServer = { settingsPanel = SettingsPanel.SERVER },
             onPassword = { settingsPanel = SettingsPanel.PASSWORD },
             onTheme = { settingsPanel = SettingsPanel.THEME },
+            onBiometricUnlockChange = onChangeBiometricUnlock,
             onLogout = { settingsPanel = SettingsPanel.LOGOUT }
         )
 
@@ -1198,7 +1214,7 @@ private fun PaginationRow(
             ) {
                 if (useArrowNav) {
                     IconButton(onClick = onPrev, enabled = currentPage > 1) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "上一页")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一页")
                     }
                 } else {
                     TextButton(onClick = onPrev, enabled = currentPage > 1) {
@@ -1235,7 +1251,7 @@ private fun PaginationRow(
 
                 if (useArrowNav) {
                     IconButton(onClick = onNext, enabled = currentPage < safeTotalPages) {
-                        Icon(Icons.Default.ArrowForward, contentDescription = "下一页")
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "下一页")
                     }
                 } else {
                     TextButton(onClick = onNext, enabled = currentPage < safeTotalPages) {
@@ -1332,6 +1348,7 @@ private fun ItemDetailDialog(
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ThumbnailImageBrowser(
     images: List<ItemImageDto>,
@@ -1341,34 +1358,55 @@ private fun ThumbnailImageBrowser(
     imageHeight: Dp,
     onOpenFullscreen: (Int) -> Unit
 ) {
-    var selectedIndex by remember(images, initialIndex) {
-        mutableIntStateOf(initialIndex.coerceIn(0, images.lastIndex))
-    }
+    val pagerState = rememberPagerState(
+        initialPage = initialIndex.coerceIn(0, images.lastIndex),
+        pageCount = { images.size }
+    )
+    val thumbnailListState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
 
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        val selected = images[selectedIndex]
+    BoxWithConstraints {
+        val estimatedVisibleThumbs = (maxWidth / 80.dp).toInt().coerceAtLeast(1)
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        val selectedIndex = pagerState.currentPage
         val base = if (imageBase.endsWith('/')) imageBase else "$imageBase/"
-        AsyncImage(
-            model = repository.fullImageUrl(base, selected.url),
-            contentDescription = null,
-            contentScale = ContentScale.Fit,
+        LaunchedEffect(selectedIndex) {
+            val targetIndex = (selectedIndex - estimatedVisibleThumbs / 2)
+                .coerceIn(0, images.lastIndex)
+            thumbnailListState.animateScrollToItem(targetIndex)
+        }
+        HorizontalPager(
+            state = pagerState,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(imageHeight)
                 .clip(RoundedCornerShape(12.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                .clickable { onOpenFullscreen(selectedIndex) }
-        )
+        ) { page ->
+            AsyncImage(
+                model = repository.fullImageUrl(base, images[page].url),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable { onOpenFullscreen(page) }
+            )
+        }
 
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             IconButton(
-                onClick = { selectedIndex = (selectedIndex - 1).coerceAtLeast(0) },
+                onClick = {
+                    if (selectedIndex > 0) {
+                        scope.launch { pagerState.animateScrollToPage(selectedIndex - 1) }
+                    }
+                },
                 enabled = selectedIndex > 0
             ) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "上一张")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一张")
             }
             LazyRow(
                 modifier = Modifier.weight(1f),
+                state = thumbnailListState,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 itemsIndexed(images, key = { _, img -> img.id }) { index, img ->
@@ -1386,15 +1424,21 @@ private fun ThumbnailImageBrowser(
                             .border(2.dp, thumbBorder, RoundedCornerShape(8.dp))
                             .clip(RoundedCornerShape(8.dp))
                             .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { selectedIndex = index }
+                            .clickable {
+                                scope.launch { pagerState.animateScrollToPage(index) }
+                            }
                     )
                 }
             }
             IconButton(
-                onClick = { selectedIndex = (selectedIndex + 1).coerceAtMost(images.lastIndex) },
+                onClick = {
+                    if (selectedIndex < images.lastIndex) {
+                        scope.launch { pagerState.animateScrollToPage(selectedIndex + 1) }
+                    }
+                },
                 enabled = selectedIndex < images.lastIndex
             ) {
-                Icon(Icons.Default.ArrowForward, contentDescription = "下一张")
+                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "下一张")
             }
         }
         Text(
@@ -1402,6 +1446,7 @@ private fun ThumbnailImageBrowser(
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.align(Alignment.CenterHorizontally)
         )
+        }
     }
 }
 
@@ -1422,16 +1467,28 @@ private fun ItemImageFullscreenDialog(
         initialPage = initialIndex.coerceIn(0, images.lastIndex),
         pageCount = { images.size }
     )
+    val scope = rememberCoroutineScope()
 
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(
+        Box(
             modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.background.copy(alpha = 0.95f)
+            contentAlignment = Alignment.Center
         ) {
-            Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(onClick = onDismiss),
+                color = MaterialTheme.colorScheme.background.copy(alpha = 0.95f)
+            ) {}
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "${pagerState.currentPage + 1}/${images.size}",
@@ -1441,13 +1498,29 @@ private fun ItemImageFullscreenDialog(
                     TextButton(onClick = onDismiss) { Text("关闭") }
                 }
                 HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { page ->
-                    ZoomableAsyncImage(
-                        model = repository.fullImageUrl(normalizedBase, images[page].url),
+                    Box(
                         modifier = Modifier
                             .fillMaxSize()
                             .clip(RoundedCornerShape(12.dp))
                             .background(MaterialTheme.colorScheme.surfaceVariant)
-                    )
+                    ) {
+                        ZoomableAsyncImage(
+                            model = repository.fullImageUrl(normalizedBase, images[page].url),
+                            modifier = Modifier
+                                .fillMaxSize(),
+                            onTap = onDismiss,
+                            onSwipeToPrevious = {
+                                if (pagerState.currentPage > 0) {
+                                    scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
+                                }
+                            },
+                            onSwipeToNext = {
+                                if (pagerState.currentPage < images.lastIndex) {
+                                    scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1457,7 +1530,10 @@ private fun ItemImageFullscreenDialog(
 @Composable
 private fun ZoomableAsyncImage(
     model: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onTap: (() -> Unit)? = null,
+    onSwipeToPrevious: (() -> Unit)? = null,
+    onSwipeToNext: (() -> Unit)? = null
 ) {
     var scale by remember(model) { mutableFloatStateOf(1f) }
     var offsetX by remember(model) { mutableFloatStateOf(0f) }
@@ -1479,6 +1555,30 @@ private fun ZoomableAsyncImage(
         contentDescription = null,
         contentScale = ContentScale.Fit,
         modifier = modifier
+            .pointerInput(model) {
+                detectTapGestures(
+                    onTap = {
+                        onTap?.invoke()
+                    }
+                )
+            }
+            .pointerInput(model, scale) {
+                if (scale > 1f) return@pointerInput
+                var totalDrag = 0f
+                detectHorizontalDragGestures(
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        totalDrag += dragAmount
+                    },
+                    onDragEnd = {
+                        when {
+                            totalDrag <= -48f -> onSwipeToNext?.invoke()
+                            totalDrag >= 48f -> onSwipeToPrevious?.invoke()
+                        }
+                        totalDrag = 0f
+                    }
+                )
+            }
             .transformable(state = transformState)
             .graphicsLayer {
                 scaleX = scale
@@ -1492,12 +1592,72 @@ private fun ZoomableAsyncImage(
 
 @Composable
 private fun SettingsMenuDialog(
+    state: MainUiState,
+    supportsBiometricUnlock: Boolean,
     onDismiss: () -> Unit,
     onServer: () -> Unit,
     onPassword: () -> Unit,
     onTheme: () -> Unit,
+    onBiometricUnlockChange: (Boolean) -> Unit,
     onLogout: () -> Unit
 ) {
+    val context = LocalContext.current
+    val activity = context as? androidx.fragment.app.FragmentActivity
+    val canShowUnlockSwitch = supportsBiometricUnlock
+    val unlockEnabled = state.biometricUnlockEnabled
+
+    fun enableAppUnlock() {
+        if (AppLockSession.isAuthenticating) {
+            Toast.makeText(context, "正在进行认证，请稍候", Toast.LENGTH_SHORT).show()
+            return
+        }
+        when (biometricAvailability(context)) {
+            androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS -> Unit
+            androidx.biometric.BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> {
+                openSystemSecuritySettings(context)
+                Toast.makeText(context, "请先在系统中录入指纹或面容", Toast.LENGTH_SHORT).show()
+                return
+            }
+            androidx.biometric.BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE -> {
+                Toast.makeText(context, "当前设备不支持指纹或面容解锁", Toast.LENGTH_SHORT).show()
+                return
+            }
+            androidx.biometric.BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE -> {
+                Toast.makeText(context, "生物识别硬件暂不可用，请稍后再试", Toast.LENGTH_SHORT).show()
+                return
+            }
+            else -> {
+                Toast.makeText(context, "当前无法使用指纹或面容解锁", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+        if (activity == null) {
+            Toast.makeText(context, "当前页面无法发起系统认证", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val launched = launchAppBiometricPrompt(
+            activity = activity,
+            onSuccess = {
+                onBiometricUnlockChange(true)
+                Toast.makeText(context, "已开启应用解锁", Toast.LENGTH_SHORT).show()
+            },
+            onError = { errorCode, message ->
+                if (isPromptNoBiometricsError(errorCode)) {
+                    openSystemSecuritySettings(context)
+                    Toast.makeText(context, "请先在系统中录入指纹或面容", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, message.ifBlank { "认证未完成，未开启应用解锁" }, Toast.LENGTH_SHORT).show()
+                }
+            },
+            onFailed = {
+                Toast.makeText(context, "识别未通过，请重试", Toast.LENGTH_SHORT).show()
+            }
+        )
+        if (!launched) {
+            Toast.makeText(context, "正在进行认证，请稍候", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("设置") },
@@ -1506,6 +1666,35 @@ private fun SettingsMenuDialog(
                 Button(onClick = onServer, modifier = Modifier.fillMaxWidth()) { Text("修改服务器信息") }
                 Button(onClick = onPassword, modifier = Modifier.fillMaxWidth()) { Text("修改密码") }
                 Button(onClick = onTheme, modifier = Modifier.fillMaxWidth()) { Text("切换主题") }
+                if (canShowUnlockSwitch) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "应用锁",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = unlockEnabled,
+                            onCheckedChange = { checked ->
+                                if (checked) {
+                                    enableAppUnlock()
+                                } else {
+                                    onBiometricUnlockChange(false)
+                                    Toast.makeText(context, "已关闭应用解锁", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
+                    }
+                    Text(
+                        text = "使用指纹或面容解锁",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { Text("退出登录") }
             }
         },

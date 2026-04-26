@@ -2,6 +2,7 @@
 
 import android.content.Context
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -22,7 +23,11 @@ data class SessionSettings(
     val activeEndpoint: ActiveEndpoint,
     val token: String,
     val appTheme: AppTheme,
-    val lastSuccessBaseUrl: String
+    val lastSuccessBaseUrl: String,
+    val biometricUnlockEnabled: Boolean = false,
+    val currentUsername: String = "",
+    val currentFullName: String = "",
+    val currentNickname: String = ""
 ) {
     fun activeBaseUrl(): String {
         val raw = when (activeEndpoint) {
@@ -39,6 +44,10 @@ data class SessionSettings(
         }.trim()
         return normalizeBaseUrl(raw)
     }
+
+    fun currentDisplayName(): String {
+        return currentFullName.ifBlank { currentNickname }.ifBlank { currentUsername }
+    }
 }
 
 class SessionRepository(private val context: Context) {
@@ -49,6 +58,10 @@ class SessionRepository(private val context: Context) {
         val token = stringPreferencesKey("token")
         val theme = stringPreferencesKey("app_theme")
         val lastSuccessBaseUrl = stringPreferencesKey("last_success_base_url")
+        val biometricUnlockEnabled = booleanPreferencesKey("biometric_unlock_enabled")
+        val currentUsername = stringPreferencesKey("current_username")
+        val currentFullName = stringPreferencesKey("current_full_name")
+        val currentNickname = stringPreferencesKey("current_nickname")
     }
 
     val settings: Flow<SessionSettings> = context.settingsDataStore.data.map { pref ->
@@ -71,8 +84,22 @@ class SessionRepository(private val context: Context) {
         }
     }
 
+    suspend fun saveBiometricUnlockEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit {
+            it[Keys.biometricUnlockEnabled] = enabled
+        }
+    }
+
     suspend fun setToken(token: String) {
         context.settingsDataStore.edit { it[Keys.token] = token }
+    }
+
+    suspend fun saveCurrentUser(username: String, fullName: String = "", nickname: String = "") {
+        context.settingsDataStore.edit {
+            it[Keys.currentUsername] = username.trim()
+            it[Keys.currentFullName] = fullName.trim()
+            it[Keys.currentNickname] = nickname.trim()
+        }
     }
 
     suspend fun saveLastSuccessBaseUrl(baseUrl: String) {
@@ -81,6 +108,16 @@ class SessionRepository(private val context: Context) {
 
     suspend fun clearToken() {
         context.settingsDataStore.edit { it[Keys.token] = "" }
+    }
+
+    suspend fun clearSessionState() {
+        context.settingsDataStore.edit {
+            it[Keys.token] = ""
+            it[Keys.lastSuccessBaseUrl] = ""
+            it[Keys.currentUsername] = ""
+            it[Keys.currentFullName] = ""
+            it[Keys.currentNickname] = ""
+        }
     }
 
     suspend fun switchEndpoint() {
@@ -97,7 +134,11 @@ class SessionRepository(private val context: Context) {
             activeEndpoint = ActiveEndpoint.valueOf(this[Keys.active] ?: ActiveEndpoint.INTERNAL.name),
             token = this[Keys.token] ?: "",
             appTheme = AppTheme.valueOf(this[Keys.theme] ?: AppTheme.SAND.name),
-            lastSuccessBaseUrl = this[Keys.lastSuccessBaseUrl] ?: ""
+            lastSuccessBaseUrl = this[Keys.lastSuccessBaseUrl] ?: "",
+            biometricUnlockEnabled = this[Keys.biometricUnlockEnabled] ?: false,
+            currentUsername = this[Keys.currentUsername] ?: "",
+            currentFullName = this[Keys.currentFullName] ?: "",
+            currentNickname = this[Keys.currentNickname] ?: ""
         )
     }
 }
