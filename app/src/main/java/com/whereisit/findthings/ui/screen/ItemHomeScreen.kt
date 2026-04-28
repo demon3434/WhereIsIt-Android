@@ -92,12 +92,14 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -2112,8 +2114,8 @@ private fun ItemFormDialog(
                             entries = imageEntries,
                             imageBase = imageBase,
                             repository = repository,
-                            onMove = { fromIndex, toIndex ->
-                                imageEntries = moveImageEntry(imageEntries, fromIndex, toIndex)
+                            onReorder = { reorderedEntries ->
+                                imageEntries = reorderedEntries
                             },
                             onDelete = { entry ->
                                 if (entry.kind == FormImageEntryKind.EXISTING && entry.imageId != null) {
@@ -2246,7 +2248,7 @@ private fun SortableImageGrid(
     entries: List<FormImageEntryState>,
     imageBase: String,
     repository: ItemRepository,
-    onMove: (Int, Int) -> Unit,
+    onReorder: (List<FormImageEntryState>) -> Unit,
     onDelete: (FormImageEntryState) -> Unit
 ) {
     if (entries.isEmpty()) return
@@ -2259,33 +2261,44 @@ private fun SortableImageGrid(
         val containerHeight = itemSize * rows + gap * (rows - 1)
         val cellStep = itemSize + gap
         val density = androidx.compose.ui.platform.LocalDensity.current
-        var draggingId by remember(entries.map { it.id }) { mutableStateOf<String?>(null) }
-        var dragStartIndex by remember(entries.map { it.id }) { mutableIntStateOf(-1) }
-        var dragTargetIndex by remember(entries.map { it.id }) { mutableIntStateOf(-1) }
+        val entryIds = entries.map { it.id }
+        val displayEntries = remember { mutableStateListOf<FormImageEntryState>() }
+        var draggingId by remember(entryIds) { mutableStateOf<String?>(null) }
+        var draggingIndex by remember(entryIds) { mutableIntStateOf(-1) }
         var dragOffsetX by remember { mutableFloatStateOf(0f) }
         var dragOffsetY by remember { mutableFloatStateOf(0f) }
+        var reorderedDuringDrag by remember { mutableStateOf(false) }
 
         fun leftFor(index: Int): Dp = cellStep * (index % columns)
         fun topFor(index: Int): Dp = cellStep * (index / columns)
+        fun clearDragState() {
+            draggingId = null
+            draggingIndex = -1
+            dragOffsetX = 0f
+            dragOffsetY = 0f
+            reorderedDuringDrag = false
+        }
 
-        val draggingEntry = remember(entries, draggingId) {
-            entries.firstOrNull { it.id == draggingId }
-        }
-        val projectedEntries = remember(entries, draggingId, dragStartIndex, dragTargetIndex) {
-            if (draggingId == null || dragStartIndex !in entries.indices) {
-                entries
+        LaunchedEffect(entryIds, draggingId) {
+            if (draggingId != null) return@LaunchedEffect
+            val currentIds = displayEntries.map { it.id }
+            val hasSameMembers = currentIds.size == entryIds.size && currentIds.toSet() == entryIds.toSet()
+            val nextEntries = if (hasSameMembers) {
+                val entriesById = entries.associateBy { it.id }
+                currentIds.mapNotNull(entriesById::get)
             } else {
-                val target = dragTargetIndex.coerceIn(0, entries.lastIndex)
-                val moved = entries[dragStartIndex]
-                buildList {
-                    addAll(entries)
-                    removeAt(dragStartIndex)
-                    add(target, moved)
-                }
+                entries
             }
+            displayEntries.clear()
+            displayEntries.addAll(nextEntries)
         }
-        val projectedIndexById = remember(projectedEntries) {
-            projectedEntries.mapIndexed { index, entry -> entry.id to index }.toMap()
+
+        val displaySnapshot = displayEntries.toList()
+        val draggingEntry = remember(displaySnapshot, draggingId) {
+            displaySnapshot.firstOrNull { it.id == draggingId }
+        }
+        val displayIndexById = remember(displaySnapshot) {
+            displaySnapshot.mapIndexed { index, entry -> entry.id to index }.toMap()
         }
 
         Box(
@@ -2293,97 +2306,88 @@ private fun SortableImageGrid(
                 .fillMaxWidth()
                 .height(containerHeight)
         ) {
-            entries.forEachIndexed { index, entry ->
-                val isDragging = draggingId == entry.id
-                val projectedIndex = if (isDragging) {
-                    dragStartIndex.coerceAtLeast(0)
-                } else {
-                    projectedIndexById[entry.id] ?: index
-                }
-                val baseX = leftFor(projectedIndex)
-                val baseY = topFor(projectedIndex)
-                val animatedX by animateDpAsState(targetValue = baseX, label = "imageCardX")
-                val animatedY by animateDpAsState(targetValue = baseY, label = "imageCardY")
+            displayEntries.forEachIndexed { index, entry ->
+                val entryId = entry.id
+                key(entryId) {
+                    val isDragging = draggingId == entryId
+                    val projectedIndex = displayIndexById[entryId] ?: index
+                    val animatedX by animateDpAsState(leftFor(projectedIndex), label = "imageCardX")
+                    val animatedY by animateDpAsState(topFor(projectedIndex), label = "imageCardY")
 
-                Box(
-                    modifier = Modifier
-                        .offset(x = animatedX, y = animatedY)
-                        .size(itemSize)
-                        .graphicsLayer {
-                            alpha = if (isDragging) 0f else 1f
-                        }
-                        .zIndex(if (isDragging) 1f else 0f)
-                        .pointerInput(entries, entry.id) {
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = {
-                                    draggingId = entry.id
-                                    dragStartIndex = entries.indexOfFirst { it.id == entry.id }
-                                    dragTargetIndex = dragStartIndex
-                                    dragOffsetX = 0f
-                                    dragOffsetY = 0f
-                                },
-                                onDragCancel = {
-                                    draggingId = null
-                                    dragStartIndex = -1
-                                    dragTargetIndex = -1
-                                    dragOffsetX = 0f
-                                    dragOffsetY = 0f
-                                },
-                                onDragEnd = {
-                                    val fromIndex = dragStartIndex
-                                    val toIndex = dragTargetIndex
-                                    if (fromIndex in entries.indices && toIndex in entries.indices && fromIndex != toIndex) {
-                                        onMove(fromIndex, toIndex)
+                    Box(
+                        modifier = Modifier
+                            .offset(x = animatedX, y = animatedY)
+                            .size(itemSize)
+                            .graphicsLayer { alpha = if (isDragging) 0f else 1f }
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .pointerInput(entryIds, entryId) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = {
+                                        draggingId = entryId
+                                        draggingIndex = displayEntries.indexOfFirst { it.id == entryId }
+                                        dragOffsetX = 0f
+                                        dragOffsetY = 0f
+                                        reorderedDuringDrag = false
+                                    },
+                                    onDragCancel = {
+                                        clearDragState()
+                                    },
+                                    onDragEnd = {
+                                        if (reorderedDuringDrag) {
+                                            onReorder(displayEntries.toList())
+                                        }
+                                        clearDragState()
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        if (draggingId != entryId) return@detectDragGesturesAfterLongPress
+                                        dragOffsetX += dragAmount.x
+                                        dragOffsetY += dragAmount.y
+                                        val currentIndex = draggingIndex
+                                        if (currentIndex !in displayEntries.indices) return@detectDragGesturesAfterLongPress
+                                        val stepPx = with(density) { cellStep.toPx() }
+                                        val itemPx = with(density) { itemSize.toPx() }
+                                        val centerX = (currentIndex % columns) * stepPx + dragOffsetX + itemPx / 2f
+                                        val centerY = (currentIndex / columns) * stepPx + dragOffsetY + itemPx / 2f
+                                        val targetColumn = (centerX / stepPx).toInt().coerceIn(0, columns - 1)
+                                        val targetRow = (centerY / stepPx).toInt().coerceIn(0, rows - 1)
+                                        val targetIndex = (targetRow * columns + targetColumn).coerceIn(0, displayEntries.lastIndex)
+                                        if (targetIndex != currentIndex) {
+                                            val deltaColumn = (targetIndex % columns) - (currentIndex % columns)
+                                            val deltaRow = (targetIndex / columns) - (currentIndex / columns)
+                                            val reorderedEntries = moveImageEntry(displayEntries, currentIndex, targetIndex)
+                                            displayEntries.clear()
+                                            displayEntries.addAll(reorderedEntries)
+                                            draggingIndex = targetIndex
+                                            dragOffsetX -= deltaColumn * stepPx
+                                            dragOffsetY -= deltaRow * stepPx
+                                            reorderedDuringDrag = true
+                                        }
                                     }
-                                    draggingId = null
-                                    dragStartIndex = -1
-                                    dragTargetIndex = -1
-                                    dragOffsetX = 0f
-                                    dragOffsetY = 0f
-                                },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    if (draggingId != entry.id) return@detectDragGesturesAfterLongPress
-                                    dragOffsetX += dragAmount.x
-                                    dragOffsetY += dragAmount.y
-
-                                    val currentIndex = dragStartIndex
-                                    if (currentIndex !in entries.indices) return@detectDragGesturesAfterLongPress
-
-                                    val stepPx = with(density) { cellStep.toPx() }
-                                    val itemPx = with(density) { itemSize.toPx() }
-                                    val currentCenterX = (currentIndex % columns) * stepPx + dragOffsetX + itemPx / 2f
-                                    val currentCenterY = (currentIndex / columns) * stepPx + dragOffsetY + itemPx / 2f
-                                    val targetColumn = (currentCenterX / stepPx).toInt().coerceIn(0, columns - 1)
-                                    val targetRow = (currentCenterY / stepPx).toInt().coerceIn(0, rows - 1)
-                                    val targetIndex = (targetRow * columns + targetColumn).coerceIn(0, entries.lastIndex)
-                                    dragTargetIndex = targetIndex
-                                }
-                            )
-                        }
-                ) {
-                    SortableImageCard(
-                        entry = entry,
-                        imageBase = imageBase,
-                        repository = repository,
-                        index = projectedIndex,
-                        isDragging = false,
-                        onDelete = { onDelete(entry) }
-                    )
+                                )
+                            }
+                    ) {
+                        SortableImageCard(
+                            entry = entry,
+                            imageBase = imageBase,
+                            repository = repository,
+                            index = projectedIndex,
+                            isDragging = false,
+                            onDelete = { onDelete(entry) }
+                        )
+                    }
                 }
             }
 
             draggingEntry?.let { entry ->
-                val startIndex = dragStartIndex.coerceAtLeast(0)
-                val baseX = leftFor(startIndex)
-                val baseY = topFor(startIndex)
+                val currentIndex = draggingIndex.coerceAtLeast(0)
                 val scale by animateFloatAsState(
                     targetValue = 1.04f,
                     label = "draggingCardScale"
                 )
                 Box(
                     modifier = Modifier
-                        .offset(x = baseX, y = baseY)
+                        .offset(x = leftFor(currentIndex), y = topFor(currentIndex))
                         .offset { IntOffset(dragOffsetX.roundToInt(), dragOffsetY.roundToInt()) }
                         .size(itemSize)
                         .zIndex(2f)
@@ -2397,7 +2401,7 @@ private fun SortableImageGrid(
                         entry = entry,
                         imageBase = imageBase,
                         repository = repository,
-                        index = (dragTargetIndex.takeIf { it >= 0 } ?: startIndex),
+                        index = currentIndex,
                         isDragging = true,
                         onDelete = { onDelete(entry) }
                     )
